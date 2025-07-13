@@ -588,4 +588,125 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+
+    import time
+    # Import the parallel tokenization function
+    from .utils.tokenization_util import run_serial_tokenization, run_parallel_tokenization, replace_best_pair_worker, count_pairs_worker
+    import multiprocessing
+
+    t0 = time.time()
+    # Step 1: 입력 파일을 문서 단위로 병렬 토크나이즈합니다.
+    # (각 문서를 문자열로 분할하여 리스트로 만듭니다)
+    docs = run_serial_tokenization(str(input_path))
+    print(f"[Timing] Step 1 (tokenization): {time.time() - t0:.3f} sec")
+
+
+    t1 = time.time()
+    # Step 2: 초기 vocab(어휘집) 생성
+    # - special token(예: <|endoftext|>)을 vocab에 먼저 추가
+    # - 전체 문서에서 등장하는 모든 유니크한 바이트(문자)를 vocab에 추가
+    vocab = {}
+    merges = []
+    idx = 0
+    for token in special_tokens:
+        vocab[idx] = token.encode('utf-8')  # special token을 먼저 추가
+        idx += 1
+    unique_bytes = set()
+    for doc in docs:
+        unique_bytes.update(doc.encode('utf-8'))  # 모든 문서에서 바이트 단위로 문자 수집
+    for b in sorted(unique_bytes):
+        if b.to_bytes(1, 'big') not in vocab.values():
+            vocab[idx] = b.to_bytes(1, 'big')  # 유니크 바이트를 vocab에 추가
+            idx += 1
+    print(f"[Timing] Step 2 (init vocab): {time.time() - t1:.3f} sec")
+
+
+    t2 = time.time()
+    # Step 3: corpus 준비
+    # 각 문서를 바이트 단위로 쪼개어 토큰 리스트(바이트 리스트)로 만듭니다.
+    corpus = []
+    byte2id = {v: k for k, v in vocab.items()}
+    for doc in docs:
+        tokens = [bytes([b]) for b in doc.encode('utf-8')]  # 각 문서를 바이트 단위로 쪼갬
+        corpus.append(tokens)
+    print(f"[Timing] Step 3 (prepare corpus): {time.time() - t2:.3f} sec")
+
+    # Step 4: BPE 반복(메인 루프)
+    # vocab 크기가 목표 vocab_size에 도달할 때까지 반복
+    import collections
+    t3 = time.time()
+    # --- 최적화: pair 위치 추적 자료구조 ---
+    pair2positions = collections.defaultdict(set)
+    for doc_idx, tokens in enumerate(corpus):
+        for i in range(len(tokens) - 1):
+            pair = (tokens[i], tokens[i+1])
+            pair2positions[pair].add((doc_idx, i))
+
+    while len(vocab) < vocab_size:
+        loop_start = time.time()
+        if not pair2positions:
+            break
+        # 가장 많이 등장하는 pair 선택
+        best_pair = max(pair2positions, key=lambda p: len(pair2positions[p]))
+        if not pair2positions[best_pair]:
+            break
+        new_token = b''.join(best_pair)
+        if new_token in byte2id:
+            break
+        vocab[idx] = new_token
+        byte2id[new_token] = idx
+        idx += 1
+        merges.append(best_pair)
+
+        # best_pair 등장 위치 복사 (수정 중 set 크기 변동 방지)
+        positions = sorted(pair2positions[best_pair])
+        # 각 문서별로 여러 위치가 있을 수 있으니, 역순으로 처리(인덱스 밀림 방지)
+        for doc_idx, i in reversed(positions):
+            tokens = corpus[doc_idx]
+            # best_pair가 실제로 있는지 확인
+            if i < len(tokens) - 1 and (tokens[i], tokens[i+1]) == best_pair:
+                # 치환 전, 앞/뒤 pair2positions에서 제거
+                if i > 0:
+                    prev_pair = (tokens[i-1], tokens[i])
+                    pair2positions[prev_pair].discard((doc_idx, i-1))
+                if i < len(tokens) - 2:
+                    next_pair = (tokens[i+1], tokens[i+2])
+                    pair2positions[next_pair].discard((doc_idx, i+1))
+                # 치환
+                tokens[i] = new_token
+                del tokens[i+1]
+                # 치환 후, 앞/뒤 pair2positions에 추가
+                if i > 0:
+                    new_prev_pair = (tokens[i-1], tokens[i])
+                    pair2positions[new_prev_pair].add((doc_idx, i-1))
+                if i < len(tokens) - 1:
+                    new_next_pair = (tokens[i], tokens[i+1])
+                    pair2positions[new_next_pair].add((doc_idx, i))
+        # best_pair는 더 이상 등장하지 않으므로 삭제
+        del pair2positions[best_pair]
+        print(f"[Timing] BPE loop iteration: {time.time() - loop_start:.3f} sec (vocab size: {len(vocab)})")
+        if len(vocab) >= vocab_size:
+            break
+
+    t4 = time.time()
+    # Step 5: vocab 크기 조정 (너무 크면 vocab_size만큼만 남김)
+    if len(vocab) > vocab_size:
+        vocab = dict(list(vocab.items())[:vocab_size])
+    print(f"[Timing] Step 5 (finalize vocab): {time.time() - t4:.3f} sec")
+
+    # Step 6: 최종 vocab(토큰 id → 바이트)과 merges(합쳐진 쌍의 리스트) 반환
+    print(f"[Timing] Total elapsed: {time.time() - t0:.3f} sec")
+    return vocab, merges
+
+if __name__ == "__main__":
+    from .common import FIXTURES_PATH
+    input_path = input_path = FIXTURES_PATH / "corpus.en"
+    vocab_size = 500
+    special_tokens = ["<|endoftext|>"]
+    vocab, merges = run_train_bpe(
+        input_path=input_path,
+        vocab_size=vocab_size,
+        special_tokens=special_tokens,
+    )
+    print("Vocab:", vocab)
+    print("Merges:", merges)

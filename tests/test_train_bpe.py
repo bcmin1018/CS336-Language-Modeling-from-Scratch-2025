@@ -31,6 +31,29 @@ def test_train_bpe():
         vocab_size=500,
         special_tokens=["<|endoftext|>"],
     )
+    print(merges)
+    # 결과 저장 (reference와 동일한 포맷)
+    # vocab: {token(str): index(int)}
+    vocab_str_keys = {}
+    for k, v in vocab.items():
+        if isinstance(v, bytes):
+            vocab_str_keys[v.decode("utf-8", errors="replace")] = k
+        else:
+            vocab_str_keys[str(v)] = k
+    with open("my_vocab.json", "w") as f:
+        json.dump(vocab_str_keys, f, indent=2, ensure_ascii=False)
+
+    # merges: list of space-joined string pairs (as in reference_merges.txt)
+    def to_merge_token_str(token_bytes):
+        if isinstance(token_bytes, bytes):
+            return " ".join(str(b) for b in token_bytes)
+        return str(token_bytes)
+
+    with open("my_merges.json", "w") as f:
+        for m in merges:
+            merge_0 = to_merge_token_str(m[0])
+            merge_1 = to_merge_token_str(m[1])
+            f.write(f"{merge_0} {merge_1}\n")
 
     # Path to the reference tokenizer vocab and merges
     reference_vocab_path = FIXTURES_PATH / "train-bpe-reference-vocab.json"
@@ -48,7 +71,7 @@ def test_train_bpe():
             for merge_token_1, merge_token_2 in gpt2_reference_merges
         ]
     assert merges == reference_merges
-
+    
     # Compare the vocab to the expected output vocab
     with open(reference_vocab_path) as f:
         gpt2_reference_vocab = json.load(f)
