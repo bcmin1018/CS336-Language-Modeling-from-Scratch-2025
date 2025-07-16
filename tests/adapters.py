@@ -590,46 +590,85 @@ def run_train_bpe(
     """
 
     import time
-    # Import the parallel tokenization function
+    import html
     from .utils.tokenization_util import run_serial_tokenization, run_parallel_tokenization, replace_best_pair_worker, count_pairs_worker
-    import multiprocessing
+    from .common import gpt2_bytes_to_unicode
 
-    t0 = time.time()
+    vocab = {}
+    idx = 0
+    gpt2_vocab = gpt2_bytes_to_unicode()
+
+    for token in special_tokens:
+        vocab[idx] = token # special token을 먼저 추가
+        idx += 1
+
+    for k, v in gpt2_vocab.items():
+        if v not in vocab.values():
+            vocab[idx] = v
+            idx += 1
+
+    
+
+    docs = run_serial_tokenization(str(input_path))
+    corpus = []
+    for doc in docs:
+        tokens = [gpt2_vocab[b] for b in doc.encode('utf-8')]  # 각 문서를 바이트 단위로 쪼갬
+        corpus.append(tokens)
+
+    
+    
+    
     # Step 1: 입력 파일을 문서 단위로 병렬 토크나이즈합니다.
     # (각 문서를 문자열로 분할하여 리스트로 만듭니다)
-    docs = run_serial_tokenization(str(input_path))
-    print(f"[Timing] Step 1 (tokenization): {time.time() - t0:.3f} sec")
+    # docs = run_serial_tokenization(str(input_path))
+    # print(f"[Timing] Step 1 (tokenization): {time.time() - t0:.3f} sec")
+
+    # t_preprocess = time.time()
+    
+    # HTML 엔티티 디코딩 (&quot; -> ", &apos; -> ' 등)
+    # decoded_docs = []
+    # for doc in docs:
+    #     decoded_doc = html.unescape(doc)
+    #     decoded_docs.append(decoded_doc)
+    
+    # GPT-2 스타일 바이트 인코딩 적용
+    # gpt2_encoder = gpt2_bytes_to_unicode()
+    # encoded_docs = []
+    
+    # for doc in decoded_docs:
+    #     encoded_chars = []
+    #     for char in doc:
+    #         # 각 문자를 UTF-8 바이트로 변환 후 GPT-2 인코딩
+    #         char_bytes = char.encode('utf-8')
+    #         for byte_val in char_bytes:
+    #             encoded_chars.append(gpt2_encoder[byte_val])
+    #     encoded_docs.append(''.join(encoded_chars))
+    
+    # 원래 docs를 전처리된 버전으로 교체
+    # docs = encoded_docs
+    
+    # print(f"[Timing] Preprocessing (HTML decode + GPT-2 encode): {time.time() - t_preprocess:.3f} sec")
 
 
-    t1 = time.time()
-    # Step 2: 초기 vocab(어휘집) 생성
-    # - special token(예: <|endoftext|>)을 vocab에 먼저 추가
-    # - 전체 문서에서 등장하는 모든 유니크한 바이트(문자)를 vocab에 추가
-    vocab = {}
+    # t1 = time.time()
+    # # Step 2: 초기 vocab(어휘집) 생성
+    # # - special token(예: <|endoftext|>)을 vocab에 먼저 추가
+    # # - 전체 문서에서 등장하는 모든 유니크한 바이트(문자)를 vocab에 추가
+
     merges = []
-    idx = 0
-    for token in special_tokens:
-        vocab[idx] = token.encode('utf-8')  # special token을 먼저 추가
-        idx += 1
-    unique_bytes = set()
-    for doc in docs:
-        unique_bytes.update(doc.encode('utf-8'))  # 모든 문서에서 바이트 단위로 문자 수집
-    for b in sorted(unique_bytes):
-        if b.to_bytes(1, 'big') not in vocab.values():
-            vocab[idx] = b.to_bytes(1, 'big')  # 유니크 바이트를 vocab에 추가
-            idx += 1
-    print(f"[Timing] Step 2 (init vocab): {time.time() - t1:.3f} sec")
+    # idx = 0
 
 
-    t2 = time.time()
-    # Step 3: corpus 준비
-    # 각 문서를 바이트 단위로 쪼개어 토큰 리스트(바이트 리스트)로 만듭니다.
-    corpus = []
+
+    # t2 = time.time()
+    # # Step 3: corpus 준비
+    # # 각 문서를 바이트 단위로 쪼개어 토큰 리스트(바이트 리스트)로 만듭니다.
+    # corpus = []
     byte2id = {v: k for k, v in vocab.items()}
-    for doc in docs:
-        tokens = [bytes([b]) for b in doc.encode('utf-8')]  # 각 문서를 바이트 단위로 쪼갬
-        corpus.append(tokens)
-    print(f"[Timing] Step 3 (prepare corpus): {time.time() - t2:.3f} sec")
+    # for doc in docs:
+    #     tokens = [bytes([b]) for b in doc.encode('utf-8')]  # 각 문서를 바이트 단위로 쪼갬
+    #     corpus.append(tokens)
+    # print(f"[Timing] Step 3 (prepare corpus): {time.time() - t2:.3f} sec")
 
     # Step 4: BPE 반복(메인 루프)
     # vocab 크기가 목표 vocab_size에 도달할 때까지 반복
@@ -650,7 +689,7 @@ def run_train_bpe(
         best_pair = max(pair2positions, key=lambda p: len(pair2positions[p]))
         if not pair2positions[best_pair]:
             break
-        new_token = b''.join(best_pair)
+        new_token = ''.join(best_pair)
         if new_token in byte2id:
             break
         vocab[idx] = new_token
@@ -695,7 +734,7 @@ def run_train_bpe(
     print(f"[Timing] Step 5 (finalize vocab): {time.time() - t4:.3f} sec")
 
     # Step 6: 최종 vocab(토큰 id → 바이트)과 merges(합쳐진 쌍의 리스트) 반환
-    print(f"[Timing] Total elapsed: {time.time() - t0:.3f} sec")
+    # print(f"[Timing] Total elapsed: {time.time() - t0:.3f} sec")
     return vocab, merges
 
 if __name__ == "__main__":
