@@ -342,6 +342,8 @@ def test_tinystories_matches_tiktoken():
         corpus_contents = f.read()
     reference_ids = reference_tokenizer.encode(corpus_contents, allowed_special={"<|endoftext|>"})
     ids = tokenizer.encode(corpus_contents)
+    print(tokenizer.decode(ids))
+
     assert ids == reference_ids
 
     assert tokenizer.decode(ids) == corpus_contents
@@ -462,3 +464,6 @@ def _encode(tokenizer, text):
     for just this function. We set the memory limit to 1MB.
     """
     return tokenizer.encode(text)
+
+if __name__ == "__main__":
+    test_roundtrip_unicode_string_with_special_tokens()

@@ -535,6 +535,7 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
+
     raise NotImplementedError
 
 
@@ -558,7 +559,12 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    from .utils.toeknizer import Tokenizer
+    return Tokenizer(
+        vocab=vocab,
+        merges=merges,
+        special_tokens=special_tokens,
+    )
 
 
 def run_train_bpe(
@@ -589,157 +595,365 @@ def run_train_bpe(
                 Merges are ordered by order of creation.
     """
 
-    import time
-    import html
-    from .utils.tokenization_util import run_serial_tokenization, run_parallel_tokenization, replace_best_pair_worker, count_pairs_worker
-    from .common import gpt2_bytes_to_unicode
-
-    vocab = {}
-    idx = 0
+    from collections import defaultdict, Counter
+    from utils.tokenization_util import run_serial_tokenization, run_parallel_tokenization, replace_best_pair_worker, count_pairs_worker
+    from common import gpt2_bytes_to_unicode
+    #https://medium.com/@hugmanskj/hands-on-bpe-byte-pair-encoding-%EB%A5%BC-%ED%99%9C%EC%9A%A9%ED%95%9C-%ED%86%A0%ED%81%AC%EB%82%98%EC%9D%B4%EC%A0%80-%EA%B5%AC%ED%98%84-6bfef6f80f3b
+    # Build GPT-2 byte-to-unicode mapping
     gpt2_vocab = gpt2_bytes_to_unicode()
+    
+    # Initialize vocabulary - this will be the final output vocab dict[int, bytes]
+    vocab = {}
+    token_to_id = {}
+    idx = 0
 
+    # Add special tokens to vocabulary first
     for token in special_tokens:
-        vocab[idx] = token # special token을 먼저 추가
+        vocab[idx] = token
+        token_to_id[token] = idx
         idx += 1
 
-    for k, v in gpt2_vocab.items():
-        if v not in vocab.values():
-            vocab[idx] = v
-            idx += 1
+    # Add all 256 possible byte values using GPT-2 encoding in the order they appear in gpt2_vocab
+    # gpt2_vocab is a dict mapping byte values to unicode chars, we need to maintain this order
+    for _, gpt2_char in gpt2_vocab.items():
+        vocab[idx] = gpt2_char
+        token_to_id[gpt2_char] = idx
+        idx += 1
 
-    
+    # Read and tokenize the corpus
+    pre_tokens = run_serial_tokenization(str(input_path))
 
-    docs = run_serial_tokenization(str(input_path))
-    corpus = []
-    for doc in docs:
-        tokens = [gpt2_vocab[b] for b in doc.encode('utf-8')]  # 각 문서를 바이트 단위로 쪼갬
-        corpus.append(tokens)
+    gpt2_style_pre_tokens = []
+    for pre_token in pre_tokens:
+        corpus = []
+        for b in pre_token.encode('utf-8'):
+            corpus.append(gpt2_vocab[b])
+        gpt2_style_pre_tokens.append(corpus)
 
-    
-    
-    
-    # Step 1: 입력 파일을 문서 단위로 병렬 토크나이즈합니다.
-    # (각 문서를 문자열로 분할하여 리스트로 만듭니다)
-    # docs = run_serial_tokenization(str(input_path))
-    # print(f"[Timing] Step 1 (tokenization): {time.time() - t0:.3f} sec")
+    pair2freq = Counter()
+    pair2positions = defaultdict(set)  
 
-    # t_preprocess = time.time()
-    
-    # HTML 엔티티 디코딩 (&quot; -> ", &apos; -> ' 등)
-    # decoded_docs = []
-    # for doc in docs:
-    #     decoded_doc = html.unescape(doc)
-    #     decoded_docs.append(decoded_doc)
-    
-    # GPT-2 스타일 바이트 인코딩 적용
-    # gpt2_encoder = gpt2_bytes_to_unicode()
-    # encoded_docs = []
-    
-    # for doc in decoded_docs:
-    #     encoded_chars = []
-    #     for char in doc:
-    #         # 각 문자를 UTF-8 바이트로 변환 후 GPT-2 인코딩
-    #         char_bytes = char.encode('utf-8')
-    #         for byte_val in char_bytes:
-    #             encoded_chars.append(gpt2_encoder[byte_val])
-    #     encoded_docs.append(''.join(encoded_chars))
-    
-    # 원래 docs를 전처리된 버전으로 교체
-    # docs = encoded_docs
-    
-    # print(f"[Timing] Preprocessing (HTML decode + GPT-2 encode): {time.time() - t_preprocess:.3f} sec")
-
-
-    # t1 = time.time()
-    # # Step 2: 초기 vocab(어휘집) 생성
-    # # - special token(예: <|endoftext|>)을 vocab에 먼저 추가
-    # # - 전체 문서에서 등장하는 모든 유니크한 바이트(문자)를 vocab에 추가
+    for token_idx, pre_token in enumerate(gpt2_style_pre_tokens):
+        for i in range(len(pre_token) -1):
+            pair = (pre_token[i], pre_token[i+1])
+            pair2freq[pair] += 1 # pair : frequency
+            pair2positions[pair].add((token_idx, i)) # pair : {(0, 0), (0, 1), ...} token_idx, token position
 
     merges = []
-    # idx = 0
+    while idx < vocab_size and pair2freq:
+        best_pair = max(pair2freq, key=lambda pair: (pair2freq[pair], pair)) 
+        positions = pair2positions[best_pair] # get best_pair positions
+        merged_token = best_pair[0] + best_pair[1]
 
-
-
-    # t2 = time.time()
-    # # Step 3: corpus 준비
-    # # 각 문서를 바이트 단위로 쪼개어 토큰 리스트(바이트 리스트)로 만듭니다.
-    # corpus = []
-    byte2id = {v: k for k, v in vocab.items()}
-    # for doc in docs:
-    #     tokens = [bytes([b]) for b in doc.encode('utf-8')]  # 각 문서를 바이트 단위로 쪼갬
-    #     corpus.append(tokens)
-    # print(f"[Timing] Step 3 (prepare corpus): {time.time() - t2:.3f} sec")
-
-    # Step 4: BPE 반복(메인 루프)
-    # vocab 크기가 목표 vocab_size에 도달할 때까지 반복
-    import collections
-    t3 = time.time()
-    # --- 최적화: pair 위치 추적 자료구조 ---
-    pair2positions = collections.defaultdict(set)
-    for doc_idx, tokens in enumerate(corpus):
-        for i in range(len(tokens) - 1):
-            pair = (tokens[i], tokens[i+1])
-            pair2positions[pair].add((doc_idx, i))
-
-    while len(vocab) < vocab_size:
-        loop_start = time.time()
-        if not pair2positions:
-            break
-        # 가장 많이 등장하는 pair 선택
-        best_pair = max(pair2positions, key=lambda p: len(pair2positions[p]))
-        if not pair2positions[best_pair]:
-            break
-        new_token = ''.join(best_pair)
-        if new_token in byte2id:
-            break
-        vocab[idx] = new_token
-        byte2id[new_token] = idx
+        vocab[idx] = merged_token
+        token_to_id[merged_token] = idx
         idx += 1
-        merges.append(best_pair)
 
-        # best_pair 등장 위치 복사 (수정 중 set 크기 변동 방지)
-        positions = sorted(pair2positions[best_pair])
-        # 각 문서별로 여러 위치가 있을 수 있으니, 역순으로 처리(인덱스 밀림 방지)
-        for doc_idx, i in reversed(positions):
-            tokens = corpus[doc_idx]
-            # best_pair가 실제로 있는지 확인
-            if i < len(tokens) - 1 and (tokens[i], tokens[i+1]) == best_pair:
-                # 치환 전, 앞/뒤 pair2positions에서 제거
-                if i > 0:
-                    prev_pair = (tokens[i-1], tokens[i])
-                    pair2positions[prev_pair].discard((doc_idx, i-1))
-                if i < len(tokens) - 2:
-                    next_pair = (tokens[i+1], tokens[i+2])
-                    pair2positions[next_pair].discard((doc_idx, i+1))
-                # 치환
-                tokens[i] = new_token
-                del tokens[i+1]
-                # 치환 후, 앞/뒤 pair2positions에 추가
-                if i > 0:
-                    new_prev_pair = (tokens[i-1], tokens[i])
-                    pair2positions[new_prev_pair].add((doc_idx, i-1))
-                if i < len(tokens) - 1:
-                    new_next_pair = (tokens[i], tokens[i+1])
-                    pair2positions[new_next_pair].add((doc_idx, i))
-        # best_pair는 더 이상 등장하지 않으므로 삭제
+        merges.append((best_pair[0], best_pair[1]))
+
+        positions_by_pre_token = defaultdict(list)
+        for pre_token_idx, pos in positions:
+            positions_by_pre_token[pre_token_idx].append(pos) # best_pair_token_idx : token position
+        
+        del pair2freq[best_pair] # best pair 을 삭제한다.
+        del pair2positions[best_pair] # best pair 을 삭제한다.
+
+        pairs_to_remove = set() # remove pairs that will be affected by the merge
+        pairs_to_add = []
+
+        for pre_token_idx, pos_list in positions_by_pre_token.items():
+            original_tokens = gpt2_style_pre_tokens[pre_token_idx]
+            for pos in pos_list:
+                if pos > 0:
+                    left_pair = (original_tokens[pos - 1], original_tokens[pos])
+                    pairs_to_remove.add((left_pair, pre_token_idx, pos - 1))
+                
+                if pos + 1 < len(original_tokens):
+                    current_pair = (original_tokens[pos], original_tokens[pos+1])
+                    pairs_to_remove.add((current_pair, pre_token_idx, pos))
+                
+                if pos + 2 < len(original_tokens):
+                    right_pair = (original_tokens[pos+1], original_tokens[pos+2])
+                    pairs_to_remove.add((right_pair, pre_token_idx, pos+1))
+
+        # Remove old pairs
+        for pair, pre_token_idx, pos in pairs_to_remove:
+            if pair in pair2freq and (pre_token_idx, pos) in pair2positions[pair]:
+                pair2freq[pair] -= 1
+                pair2positions[pair].remove((pre_token_idx, pos))
+                if pair2freq[pair] == 0:
+                    del pair2freq[pair]
+                    del pair2positions[pair]
+
+        # Perform the actual merging
+        for pre_token_idx, pos_list in positions_by_pre_token.items():
+            pre_token = gpt2_style_pre_tokens[pre_token_idx]
+            pos_array = sorted(pos_list, reverse=True)
+            
+            for pos in pos_array:
+                if pos + 1 < len(pre_token):
+                    pre_token[pos] = merged_token
+                    del pre_token[pos + 1]
+
+        # Add new pairs after merging
+        for pre_token_idx, pos_list in positions_by_pre_token.items():
+            tokens = gpt2_style_pre_tokens[pre_token_idx]
+            sorted_positions = sorted(pos_list)
+            
+            for i, original_pos in enumerate(sorted_positions):
+                adjusted_pos = original_pos - i
+                
+                if adjusted_pos > 0:
+                    left_pair = (tokens[adjusted_pos-1], tokens[adjusted_pos])
+                    pairs_to_add.append((left_pair, pre_token_idx, adjusted_pos-1))
+                
+                if adjusted_pos < len(tokens) - 1:
+                    right_pair = (tokens[adjusted_pos], tokens[adjusted_pos+1])
+                    pairs_to_add.append((right_pair, pre_token_idx, adjusted_pos))
+        
+        # Add new pairs to tracking
+        for pair, pre_token_idx, pos in pairs_to_add:
+            pair2freq[pair] += 1
+            pair2positions[pair].add((pre_token_idx, pos))
+
+    # Convert vocab values back to bytes for output
+    final_vocab = {}
+    for token_id, token_str in vocab.items():
+        if isinstance(token_str, str):
+            final_vocab[token_id] = token_str.encode('utf-8')
+        else:
+            final_vocab[token_id] = token_str
+
+    return final_vocab, merges
+
+def run_train_bpe_optimized(
+    input_path: str | os.PathLike,
+    vocab_size: int,
+    special_tokens: list[str],
+    **kwargs,
+) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    """Given the path to an input corpus, run train a BPE tokenizer and
+    output its vocabulary and merges.
+
+    Args:
+        input_path (str | os.PathLike): Path to BPE tokenizer training data.
+        vocab_size (int): Total number of items in the tokenizer's vocabulary (including special tokens).
+        special_tokens (list[str]): A list of string special tokens to be added to the tokenizer vocabulary.
+            These strings will never be split into multiple tokens, and will always be
+            kept as a single token. If these special tokens occur in the `input_path`,
+            they are treated as any other string.
+
+    Returns:
+        tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+            vocab:
+                The trained tokenizer vocabulary, a mapping from int (token ID in the vocabulary)
+                to bytes (token bytes)
+            merges:
+                BPE merges. Each list item is a tuple of bytes (<token1>, <token2>),
+                representing that <token1> was merged with <token2>.
+                Merges are ordered by order of creation.
+    """
+
+    import time
+    from collections import defaultdict
+    from utils.tokenization_util import run_serial_tokenization, run_parallel_tokenization, replace_best_pair_worker, count_pairs_worker
+    from common import gpt2_bytes_to_unicode
+    #https://medium.com/@hugmanskj/hands-on-bpe-byte-pair-encoding-%EB%A5%BC-%ED%99%9C%EC%9A%A9%ED%95%9C-%ED%86%A0%ED%81%AC%EB%82%98%EC%9D%B4%EC%A0%80-%EA%B5%AC%ED%98%84-6bfef6f80f3b
+    total_start_time = time.time()
+    print(f"Starting BPE training with vocab_size={vocab_size}")
+    
+    # Build GPT-2 byte-to-unicode mapping
+    init_start = time.time()
+    gpt2_vocab = gpt2_bytes_to_unicode()
+    
+    # Initialize vocabulary - this will be the final output vocab dict[int, bytes]
+    vocab = {}
+    # Also maintain a token-to-id mapping for building vocab
+    token_to_id = {}
+    idx = 0
+
+    # Add special tokens to vocabulary first
+    for token in special_tokens:
+        vocab[idx] = token
+        token_to_id[token] = idx
+        idx += 1
+
+    # Add all 256 possible byte values using GPT-2 encoding in the order they appear in gpt2_vocab
+    # gpt2_vocab is a dict mapping byte values to unicode chars, we need to maintain this order
+    for byte_val, gpt2_char in gpt2_vocab.items():
+        vocab[idx] = gpt2_char
+        token_to_id[gpt2_char] = idx
+        idx += 1
+    print(f"Initialization time: {time.time() - init_start:.4f}s")
+
+    # Read and tokenize the corpus
+    tokenization_start = time.time()
+    docs = run_serial_tokenization(str(input_path))
+    print(f"Corpus reading time: {time.time() - tokenization_start:.4f}s")
+    
+    corpus_process_start = time.time()
+    # docs = [
+    #     "low low low low low",
+    #     "lower lower widest widest widest",
+    #     "newest newest newest newest newest newest",
+    # ]
+    global_corpus = []
+    for doc in docs:
+        corpus = []
+        doc_bytes = doc.encode('utf-8')
+        for byte_val in doc_bytes:
+            gpt2_encoded = gpt2_vocab[byte_val]
+            corpus.append(gpt2_encoded)
+        global_corpus.append(corpus)
+    print(f"Corpus processing time: {time.time() - corpus_process_start:.4f}s")
+
+    from collections import defaultdict, Counter
+    initial_count_start = time.time()
+    pair2freq = Counter()
+    pair2positions = defaultdict(set)  # pair -> set of (doc_idx, pos)
+
+    for doc_idx, tokens in enumerate(global_corpus):
+        for i in range(len(tokens) - 1):
+            pair = (tokens[i], tokens[i + 1])
+            pair2freq[pair] += 1
+            pair2positions[pair].add((doc_idx, i))
+    print(f"Initial pair counting time: {time.time() - initial_count_start:.4f}s")
+
+    # Initialize merges list
+    merges = []
+    
+    main_loop_start = time.time()
+    iteration = 0
+    
+    while len(vocab) < vocab_size and pair2freq:
+        iteration += 1
+        iter_start = time.time()
+        
+        # find most freq pair
+        find_best_start = time.time()
+        best_pair = max(pair2freq, key=lambda pair: (pair2freq[pair], pair))
+        positions = pair2positions[best_pair]
+        merged_token = best_pair[0] + best_pair[1]
+        vocab[idx] = merged_token
+        token_to_id[merged_token] = idx
+        merges.append((best_pair[0], best_pair[1]))
+        idx += 1
+        print(f"Iter {iteration}: Finding best pair took {time.time() - find_best_start:.4f}s")
+
+        # For all positions where the pair occurs, merge them
+        group_start = time.time()
+        positions_by_doc = defaultdict(list)
+        for doc_idx, pos in positions:
+            positions_by_doc[doc_idx].append(pos)
+        print(f"Iter {iteration}: Grouping positions took {time.time() - group_start:.4f}s")
+        
+        # remove old pair from stats
+        cleanup_start = time.time()
+        del pair2freq[best_pair]
         del pair2positions[best_pair]
-        print(f"[Timing] BPE loop iteration: {time.time() - loop_start:.3f} sec (vocab size: {len(vocab)})")
-        if len(vocab) >= vocab_size:
-            break
+        print(f"Iter {iteration}: Cleanup took {time.time() - cleanup_start:.4f}s")
 
-    t4 = time.time()
-    # Step 5: vocab 크기 조정 (너무 크면 vocab_size만큼만 남김)
-    if len(vocab) > vocab_size:
-        vocab = dict(list(vocab.items())[:vocab_size])
-    print(f"[Timing] Step 5 (finalize vocab): {time.time() - t4:.3f} sec")
+        # Incremental position updates: only update pairs affected by the merge
+        update_start = time.time()
+        
+        # Track pairs to remove and add (use sets to avoid duplicates)
+        pairs_to_remove = set()
+        pairs_to_add = []
+        
+        # Before merging, collect pairs that will be affected
+        for doc_idx, pos_list in positions_by_doc.items():
+            original_tokens = global_corpus[doc_idx]  # This is still the pre-merge version
+            
+            for pos in pos_list:
+                # Remove old pairs around each merge position
+                # Left neighbor pair: (pos-1, pos)
+                if pos > 0 and pos < len(original_tokens):
+                    left_pair = (original_tokens[pos-1], original_tokens[pos])
+                    pairs_to_remove.add((left_pair, doc_idx, pos-1))
+                
+                # Current pair: (pos, pos+1) - this is the pair being merged
+                if pos + 1 < len(original_tokens):
+                    current_pair = (original_tokens[pos], original_tokens[pos+1])
+                    pairs_to_remove.add((current_pair, doc_idx, pos))
+                
+                # Right neighbor pair: (pos+1, pos+2)
+                if pos + 1 < len(original_tokens) and pos + 2 < len(original_tokens):
+                    right_pair = (original_tokens[pos+1], original_tokens[pos+2])
+                    pairs_to_remove.add((right_pair, doc_idx, pos+1))
+        
+        # Remove old pairs
+        for pair, doc_idx, pos in pairs_to_remove:
+            if pair in pair2freq and (doc_idx, pos) in pair2positions[pair]:
+                pair2freq[pair] -= 1
+                pair2positions[pair].remove((doc_idx, pos))
+                if pair2freq[pair] == 0:
+                    del pair2freq[pair]
+                    del pair2positions[pair]
+        
+        # Now perform the actual merging (move this here from above)
+        merge_start = time.time()
+        import numpy as np
+        for doc_idx, pos_list in positions_by_doc.items():
+            tokens = global_corpus[doc_idx]
+            if not pos_list:
+                continue
+                
+            # Sort positions in reverse order to avoid index shifting issues
+            pos_array = sorted(pos_list, reverse=True)
+            
+            # Apply merges
+            for pos in pos_array:
+                if pos + 1 < len(tokens):
+                    tokens[pos] = merged_token
+                    del tokens[pos + 1]  # Remove the second token
+            
+            global_corpus[doc_idx] = tokens
+        print(f"Iter {iteration}: Merging took {time.time() - merge_start:.4f}s")
+        
+        # After merging, add new pairs
+        for doc_idx, pos_list in positions_by_doc.items():
+            tokens = global_corpus[doc_idx]
+            
+            # Calculate adjusted positions after merging
+            sorted_positions = sorted(pos_list)
+            for i, original_pos in enumerate(sorted_positions):
+                # Account for deletions that happened before this position
+                adjusted_pos = original_pos - i
+                
+                # Add new pairs around the merged position
+                # Left neighbor: (adjusted_pos-1, adjusted_pos)
+                if adjusted_pos > 0 and adjusted_pos < len(tokens):
+                    left_pair = (tokens[adjusted_pos-1], tokens[adjusted_pos])
+                    pairs_to_add.append((left_pair, doc_idx, adjusted_pos-1))
+                
+                # Right neighbor: (adjusted_pos, adjusted_pos+1)
+                if adjusted_pos < len(tokens) - 1:
+                    right_pair = (tokens[adjusted_pos], tokens[adjusted_pos+1])
+                    pairs_to_add.append((right_pair, doc_idx, adjusted_pos))
+        
+        # Add new pairs
+        for pair, doc_idx, pos in pairs_to_add:
+            pair2freq[pair] += 1
+            pair2positions[pair].add((doc_idx, pos))
+        
+        print(f"Iter {iteration}: Position updates took {time.time() - update_start:.4f}s")
+        print(f"Iter {iteration}: Total iteration time: {time.time() - iter_start:.4f}s")
+        print(f"Iter {iteration}: Remaining vocab to build: {vocab_size - len(vocab)}")
+        print("---")
+    
+    print(f"Main loop total time: {time.time() - main_loop_start:.4f}s")
 
-    # Step 6: 최종 vocab(토큰 id → 바이트)과 merges(합쳐진 쌍의 리스트) 반환
-    # print(f"[Timing] Total elapsed: {time.time() - t0:.3f} sec")
+    # Convert back to int/bytes for output
+    final_convert_start = time.time()
+    print(f"Final conversion time: {time.time() - final_convert_start:.4f}s")
+    print(f"Total BPE training time: {time.time() - total_start_time:.4f}s")
+    
     return vocab, merges
 
 if __name__ == "__main__":
-    from .common import FIXTURES_PATH
-    input_path = input_path = FIXTURES_PATH / "corpus.en"
+    from common import FIXTURES_PATH
+    input_path = FIXTURES_PATH / "corpus.en"
+    # input_path = FIXTURES_PATH / "tinystories_sample_5M.txt"
     vocab_size = 500
     special_tokens = ["<|endoftext|>"]
     vocab, merges = run_train_bpe(
